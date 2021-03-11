@@ -37,9 +37,13 @@ func (d *Device) initializeMQTTClient(brokerAddress string) error {
 	opts := mqtt.NewClientOptions()
 	opts.AddBroker(brokerAddress)
 	opts.SetAutoReconnect(d.AutoReconnect)
+	opts.SetConnectRetry(d.AutoReconnect)
 	opts.SetStore(s)
 	opts.SetClientID(fmt.Sprintf("%s/%s", d.realm, d.deviceID))
 	opts.SetConnectTimeout(30 * time.Second)
+	if d.AutoReconnect {
+		opts.SetConnectRetryInterval(30 * time.Second)
+	}
 
 	tlsConfig, err := d.getTLSConfig()
 	if err != nil {
@@ -48,6 +52,18 @@ func (d *Device) initializeMQTTClient(brokerAddress string) error {
 	opts.SetTLSConfig(tlsConfig)
 
 	opts.SetOnConnectHandler(func(client mqtt.Client) {
+		if err := d.setupSubscriptions(); err != nil {
+			d.m.Disconnect(0)
+			fmt.Println(err)
+			return
+		}
+
+		if err := d.sendIntrospection(); err != nil {
+			d.m.Disconnect(0)
+			fmt.Println(err)
+			return
+		}
+
 		if d.OnConnectionStateChanged != nil {
 			d.OnConnectionStateChanged(d, true)
 		}
@@ -160,7 +176,6 @@ func (d *Device) initializeMQTTClient(brokerAddress string) error {
 		}
 	})
 
-	//	opts.SetOnConnectHandler()
 	d.m = mqtt.NewClient(opts)
 
 	return nil

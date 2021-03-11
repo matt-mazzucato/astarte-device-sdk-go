@@ -86,80 +86,87 @@ func newDevice(deviceID, realm, credentialsSecret string, pairingBaseURL string,
 // Connect connects the device through a goroutine
 func (d *Device) Connect(result chan<- error) {
 	go func(result chan<- error) {
+		// Let's check the channel is valid
+		if result == nil {
+			fmt.Println("The channel cannot be nil.")
+			return
+		}
+
 		// Are we connected already?
 		if d.IsConnected() {
-			if result != nil {
-				result <- nil
-			}
+			result <- nil
 			return
 		}
 
 		// At least one interface available?
 		if len(d.interfaces) == 0 {
-			if result != nil {
-				result <- errors.New("Add at least an interface before attempting to connect")
-			}
+			result <- errors.New("Add at least an interface before attempting to connect")
 			return
 		}
 
-		// First of all, ensure we have a certificate
-		if err := d.ensureCertificate(); err != nil {
-			if result != nil {
-				result <- err
-			}
-			return
-		}
-
+		// First of all, get the broker URL with an HTTP request
 		brokerURL, err := d.getBrokerURL()
-		if err != nil {
-			if result != nil {
-				result <- err
+		for {
+			if err != nil && d.AutoReconnect {
+				fmt.Println("Cannot get brokerURL. Retrying in 30 seconds.")
+
+				// sleep until the next attempt
+				time.Sleep(30 * time.Second)
+
+				// and retry
+				brokerURL, err = d.getBrokerURL()
 			}
+
+			if err != nil && !d.AutoReconnect {
+				fmt.Println("Cannot get brokerURL.")
+				result <- err
+				return
+			}
+
+			if err == nil {
+				fmt.Println("Got brokerURL: ", brokerURL)
+				break
+			}
+		}
+
+		// Ensure we have a certificate
+		if err := d.ensureCertificate(); err != nil {
+			result <- err
 			return
 		}
 
 		if err := d.initializeMQTTClient(brokerURL); err != nil {
-			if result != nil {
-				result <- err
-			}
+			result <- err
 			return
 		}
 
 		// Wait for the token - we're in a coroutine anyway
 		connectToken := d.m.Connect()
-		if ok := connectToken.WaitTimeout(30 * time.Second); !ok {
-			if result != nil {
-				result <- errors.New("Timed out while connecting to the Broker")
-			}
-			return
-		}
-		if connectToken.Error() != nil {
-			if result != nil {
+		if d.AutoReconnect {
+			if connectToken.Wait() && connectToken.Error() != nil {
 				result <- connectToken.Error()
 			}
-			return
+		} else {
+			if ok := connectToken.WaitTimeout(30 * time.Second); !ok {
+				result <- errors.New("Timed out while connecting to the Broker.")
+				return
+			}
 		}
 
 		// If connected successfully, setup subscriptions and send the introspection before notifying
 		if err := d.setupSubscriptions(); err != nil {
 			d.m.Disconnect(0)
-			if result != nil {
-				result <- err
-			}
+			result <- err
 			return
 		}
 		if err := d.sendIntrospection(); err != nil {
 			d.m.Disconnect(0)
-			if result != nil {
-				result <- err
-			}
+			result <- err
 			return
 		}
 
 		// All good: notify, and our routine is over.
-		if result != nil {
-			result <- nil
-		}
+		result <- nil
 	}(result)
 }
 
